@@ -1,0 +1,2 @@
+# هیچ وابستگی‌ای لازم نیست - فقط کتابخانه استاندارد پایتون
+# no third-party dependencies - python stdlib only
