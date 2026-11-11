@@ -170,7 +170,9 @@ CHARS = [
     {"id": 166, "name": "Yeti", "path": "res://assets/characters/Yeti/Yeti.tscn", "card_path": "res://assets/characters/Yeti/yetirender.png", "tier": "Special"},
 ]
 
-TIER_PRICE = {'Common': 1000, 'Rare': 3000, 'Legendary': 8000}
+TIER_PRICE = {'Common': 1000, 'Rare': 3000, 'Legendary': 8000, 'Epic': 20000, 'Special': 50000}
+EXACT_PRICE = {'Common': 1500, 'Rare': 4000, 'Legendary': 10000, 'Epic': 25000, 'Special': 50000}
+STARTER_IDS = [1, 2, 3, 5, 7, 8]
 CLAN_LEVELS = [{'level': i, 'max_count': 10 + i * 10, 'price': 1000 * i} for i in range(1, 6)]
 SYNC_PRICES = {
     'character_common': 1000, 'character_rare': 3000, 'character_legendary': 8000, 'character_epic': 20000,
@@ -238,7 +240,7 @@ def new_account(username):
         'jail_time': 0, 'in_prison': False,
         'email': '', 'daily_claim_time': 0,
         'progress_level': 1, 'is_meta_progress_finished': True,
-        'characters': [dict(c) for c in CHARS],
+        'characters': [dict(c) for c in CHARS if int(c['id']) in STARTER_IDS],
         'purchases': [], 'animations': {}, 'data': {}, 'clan_id': None,
         'job_stats': {'menu': 0, 'cook': 0, 'deliver': 0, 'clean': 0, 'visit': 0, 'heal': 0, 'cash': 0, 'policeKill': 0, 'arrest': 0, 'policeReport': 0, 'policeReportNormal': 0},
         'police_license': False, 'police_q': None, 'police_score': 0,
@@ -317,7 +319,8 @@ def member_json(a):
 def rank_rows(sort_key):
     rows = []
     for a in state['accounts'].values():
-        rows.append({'id': a['username'], 'handle': a['handle'], 'name': a['handle'], 'cup': a['cup'], 'coin': a['coin'], 'crown': a['crown'], 'win_count': a['win_count'], 'value': a.get(sort_key, 0), 'count': a.get(sort_key, 0), 'title': a.get('title', ''), 'rank': 0, 'character': CHARS[0]['path'], 'path': CHARS[0]['path'], 'card_path': CHARS[0]['card_path']})
+        last_char = (a.get('characters') or [CHARS[0]])[-1]
+        rows.append({'id': a['username'], 'handle': a['handle'], 'name': a['handle'], 'cup': a['cup'], 'coin': a['coin'], 'crown': a['crown'], 'win_count': a['win_count'], 'num_chars': len(a.get('characters', [])), 'value': a.get(sort_key, 0), 'count': a.get(sort_key, 0), 'title': a.get('title', ''), 'rank': 0, 'character': last_char.get('path', CHARS[0]['path']), 'path': last_char.get('path', CHARS[0]['path']), 'card_path': last_char.get('card_path', CHARS[0]['card_path'])})
     rows.sort(key=lambda r: r.get(sort_key, 0), reverse=True)
     rows = rows[:50]
     for i, r in enumerate(rows):
@@ -413,6 +416,270 @@ def route_admin(path, body):
     return 200, {'coin': target.get('coin'), 'user': {'id': target.get('num_id', 0), 'username': target['username'], 'handle': target.get('handle'), 'title': target.get('title', ''), 'bazras': bool(target.get('bazras'))}}
 
 
+
+
+# ================= clans / friends / phone  (/mobile/*) =================
+CLAN_RANKS = ['Normal', 'Elder', 'Coleader', 'Leader']
+
+
+def _clan_state():
+    return state.setdefault('clans', [])
+
+
+def _clan_by_id(cid):
+    try:
+        cid = int(cid)
+    except Exception:
+        return None
+    for c in _clan_state():
+        if int(c.get('id', 0)) == cid:
+            return c
+    return None
+
+
+def _my_clan(a):
+    cid = a.get('clan_id')
+    if cid is None:
+        return None
+    return _clan_by_id(cid)
+
+
+def _member_row(c, m, a, index):
+    acct = state['accounts'].get(m.get('username'), {})
+    return {
+        'id': m.get('id'),
+        'player_id': m.get('username'),
+        'handle': acct.get('handle', m.get('handle', '?')),
+        'cup': acct.get('cup', 0),
+        'title': acct.get('title', ''),
+        'rank': m.get('rank', 'Normal'),
+        'index': index,
+        'score': acct.get('cup', 0),
+    }
+
+
+def _clan_members(c, a):
+    out = []
+    for i, m in enumerate(c.get('members', [])):
+        out.append(_member_row(c, m, a, i + 1))
+    return out
+
+
+def _clan_public(c):
+    return {
+        'id': c.get('id'),
+        'name': c.get('name'),
+        'level': c.get('level', 1),
+        'badge_id': c.get('badge_id', 0),
+        'type': c.get('type', 'Public'),
+        'member_count': len(c.get('members', [])),
+        'total_score': c.get('total_score', 0),
+        'bank': c.get('bank', 0),
+        'owner_id': c.get('owner_id'),
+        'description': c.get('description', ''),
+    }
+
+
+def _add_to_clan(c, a, rank='Normal'):
+    members = c.setdefault('members', [])
+    for m in members:
+        if m.get('username') == a['username']:
+            return
+    state['membershipCounter'] = int(state.get('membershipCounter', 0)) + 1
+    members.append({'id': state['membershipCounter'], 'username': a['username'], 'handle': a.get('handle'), 'rank': rank})
+    a['clan_id'] = c['id']
+
+
+def _remove_from_clan(c, a):
+    c['members'] = [m for m in c.get('members', []) if m.get('username') != a['username']]
+    a['clan_id'] = None
+
+
+def _clan_score(c):
+    total = 0
+    for m in c.get('members', []):
+        acct = state['accounts'].get(m.get('username'))
+        if acct:
+            total += int(acct.get('cup', 0))
+    c['total_score'] = total
+    return total
+
+
+def _clan_leaderboard(key):
+    rows = []
+    for c in _clan_state():
+        _clan_score(c)
+        rows.append(_clan_public(c))
+    rows.sort(key=lambda r: r.get('bank' if key == 'bank' else 'total_score', 0), reverse=True)
+    rows = rows[:50]
+    for i, r in enumerate(rows):
+        r['rank'] = i + 1
+    return rows
+
+
+def route_mobile(path, body, a):
+    if a is None:
+        return 401, {'error': 'unauthorized'}
+    if path == '/mobile/list_clans/':
+        return 200, {'clans': [_clan_public(c) for c in _clan_state()]}
+    if path == '/mobile/search_clan/':
+        q = str(body.get('query') or body.get('name') or '').strip().lower()
+        out = [c for c in _clan_state() if not q or q in str(c.get('name', '')).lower()]
+        return 200, {'clans': [_clan_public(c) for c in out]}
+    if path == '/mobile/my_clan/':
+        c = _my_clan(a)
+        return 200, {'clan': _clan_public(c) if c else None}
+    if path == '/mobile/clan_detail/':
+        c = _clan_by_id(body.get('id'))
+        if c is None:
+            return 404, {}
+        _clan_score(c)
+        return 200, {'clan': _clan_public(c), 'members': _clan_members(c, a), 'score': c.get('total_score', 0)}
+    if path == '/mobile/list_clan_members/':
+        c = _clan_by_id(body.get('id')) or _my_clan(a)
+        if c is None:
+            return 200, {'members': []}
+        return 200, {'members': _clan_members(c, a)}
+    if path in ('/mobile/clan_leaderboard/', '/mobile/clan_bank_leaderboard/'):
+        key = 'bank' if path.endswith('bank_leaderboard/') else 'score'
+        return 200, {'clans': _clan_leaderboard(key)}
+    if path == '/mobile/list_clan_transactions/':
+        return 200, {'message': []}
+    if path == '/mobile/create_clan/':
+        name = str(body.get('name') or '').strip()[:24]
+        if not name:
+            return 400, {}
+        price = CLAN_LEVELS[0]['price']
+        if a['coin'] < price:
+            return 400, {'coin': a['coin']}
+        a['coin'] -= price
+        state['clanCounter'] = int(state.get('clanCounter', 0)) + 1
+        c = {'id': state['clanCounter'], 'name': name, 'level': 1, 'badge_id': int(body.get('badge_id') or 0),
+             'type': str(body.get('type') or 'Public'), 'description': str(body.get('description') or '')[:80],
+             'members': [], 'bank': 0, 'total_score': 0, 'owner_id': a['username']}
+        _clan_state().append(c)
+        _add_to_clan(c, a, 'Leader')
+        save_state()
+        return 200, {'clan': _clan_public(c), 'coin': a['coin']}
+    if path == '/mobile/join_clan/':
+        c = _clan_by_id(body.get('id'))
+        if c is None:
+            return 404, {}
+        _add_to_clan(c, a, 'Normal')
+        save_state()
+        return 200, {'joined': True, 'clan': _clan_public(c)}
+    if path == '/mobile/leave_clan/':
+        c = _my_clan(a)
+        if c is not None:
+            _remove_from_clan(c, a)
+            if not c.get('members'):
+                _clan_state().remove(c)
+            save_state()
+        return 200, {}
+    if path == '/mobile/update_clan/':
+        c = _my_clan(a)
+        if c is None:
+            return 404, {}
+        if body.get('name'):
+            c['name'] = str(body.get('name'))[:24]
+        if body.get('badge_id') is not None:
+            c['badge_id'] = int(body.get('badge_id') or 0)
+        if body.get('type'):
+            c['type'] = str(body.get('type'))
+        if body.get('description') is not None:
+            c['description'] = str(body.get('description'))[:80]
+        save_state()
+        return 200, {'clan': _clan_public(c)}
+    if path == '/mobile/update_clan_membership/':
+        c = _my_clan(a)
+        if c is None:
+            return 404, {}
+        mid = body.get('membership_id') or body.get('id')
+        for m in list(c.get('members', [])):
+            if str(m.get('id')) == str(mid):
+                if body.get('rank'):
+                    m['rank'] = str(body.get('rank'))
+                if body.get('kick'):
+                    c['members'].remove(m)
+                    t = state['accounts'].get(m.get('username'))
+                    if t:
+                        t['clan_id'] = None
+                break
+        save_state()
+        return 200, {'members': _clan_members(c, a)}
+    if path in ('/mobile/upgrade_clan/', '/mobile/upgrade_clan_with_bank/'):
+        c = _my_clan(a)
+        if c is None:
+            return 404, {}
+        lvl = int(c.get('level', 1))
+        if lvl >= len(CLAN_LEVELS):
+            return 400, {}
+        price = CLAN_LEVELS[lvl]['price']
+        if path.endswith('with_bank/'):
+            if int(c.get('bank', 0)) < price:
+                return 400, {}
+            c['bank'] = int(c.get('bank', 0)) - price
+        else:
+            if a['coin'] < price:
+                return 400, {}
+            a['coin'] -= price
+        c['level'] = lvl + 1
+        save_state()
+        return 200, {'clan': _clan_public(c), 'coin': a['coin']}
+    if path == '/mobile/deposit_clan_bank/':
+        c = _my_clan(a)
+        if c is None:
+            return 404, {}
+        amt = max(0, int(body.get('amount') or body.get('coin') or 0))
+        if a['coin'] < amt:
+            return 400, {}
+        a['coin'] -= amt
+        c['bank'] = int(c.get('bank', 0)) + amt
+        save_state()
+        return 200, {'coin': a['coin'], 'clan': _clan_public(c)}
+    if path == '/mobile/list_friends/':
+        out = []
+        for f2 in a.setdefault('friends', []):
+            t = state['accounts'].get(f2)
+            if t:
+                out.append({'id': f2, 'player_id': f2, 'handle': t.get('handle'), 'cup': t.get('cup', 0), 'title': t.get('title', '')})
+        return 200, {'friends': out}
+    if path == '/mobile/change_friendship/':
+        other = str(body.get('player_id') or body.get('id') or '')
+        fr = a.setdefault('friends', [])
+        if other and other != a['username']:
+            if other in fr:
+                fr.remove(other)
+            else:
+                fr.append(other)
+        save_state()
+        return 200, {}
+    if path == '/mobile/invite_friend/':
+        return 200, {}
+    if path == '/mobile/list_invites/':
+        return 200, {'invites': []}
+    if path == '/mobile/purchase_mobile/':
+        pid = int(body.get('id') or 0)
+        ph = None
+        for item in PHONES:
+            if int(item['id']) == pid:
+                ph = item
+                break
+        if ph is None:
+            return 400, {}
+        price = int(ph.get('price') or 0)
+        if a['coin'] < price:
+            return 400, {'coin': a['coin']}
+        a['coin'] -= price
+        save_state()
+        return 200, {'coin': a['coin'], 'mobile_id': pid}
+    if path == '/mobile/update_mobile_color/':
+        a['mobile_color'] = int(body.get('color') or 0)
+        save_state()
+        return 200, {}
+    return 200, {}
+
+
 def route(path, body, a):
     now = int(time.time())
     # ---- account ----
@@ -431,10 +698,12 @@ def route(path, body, a):
         save_state()
         log('register -> ' + username)
         return 200, {'handle': acct['handle'], 'token': tok, 'username': username, 'id': nid}
+    if path.startswith('/mobile/'):
+        return route_mobile(path, body, a)
     if a is None:
         return 401, {'error': 'unauthorized'}
     if path == '/account/sync/':
-        return 200, {'data': {'data': a.get('data', {})}, 'member': member_json(a), 'characters': a['characters'], 'sync': SYNC_PRICES, 'online_count': max(1, len(state['accounts'])), 'public_chat': 'PublicChat', 'progresses': PROGRESS, 'phones': PHONES, 'clan': None, 'clan_levels': CLAN_LEVELS}
+        return 200, {'data': {'data': a.get('data', {})}, 'member': member_json(a), 'characters': a['characters'], 'sync': SYNC_PRICES, 'online_count': max(1, len(state['accounts'])), 'public_chat': 'PublicChat',  'progresses': PROGRESS, 'phones': PHONES, 'clan': (_clan_public(_my_clan(a)) if _my_clan(a) else None), 'clan_levels': CLAN_LEVELS}
     if path == '/account/save_data/':
         jwt = a.get('data', {}).get('JWT') if isinstance(a.get('data'), dict) else None
         a['data'] = body
@@ -517,11 +786,14 @@ def route(path, body, a):
         save_state()
         return 200, {'prize': prize, 'coins': a['coin']}
     if path == '/shop/unlock_new_character_v2/':
-        tier = body.get('tier') or 'Common'
+        tier = str(body.get('tier') or 'Common')
         price = TIER_PRICE.get(tier, 1000)
+        owned = set(int(c['id']) for c in a['characters'])
+        pool = [c for c in CHARS if c['tier'] == tier and int(c['id']) not in owned]
+        if not pool:
+            return 400, {'error': 'all owned'}
         if a['coin'] < price:
-            return 400, {}
-        pool = [c for c in CHARS if c['tier'] == tier] or [CHARS[0]]
+            return 400, {'coin': a['coin']}
         c = random.choice(pool)
         a['coin'] -= price
         a['characters'].append(dict(c))
@@ -533,9 +805,9 @@ def route(path, body, a):
             return 400, {}
         if any(x['id'] == c['id'] for x in a['characters']):
             return 401, {}
-        price = TIER_PRICE.get(c['tier'], 1000)
+        price = EXACT_PRICE.get(c['tier'], 1500)
         if a['coin'] < price:
-            return 400, {}
+            return 400, {'coin': a['coin']}
         a['coin'] -= price
         a['characters'].append(dict(c))
         save_state()
@@ -675,7 +947,19 @@ def route(path, body, a):
         rows = rank_rows('coin')
         return 200, {'ranks': rows, 'my_rank': next((r['rank'] for r in rows if r.get('id') == a.get('username')), 0)}
     if path == '/game/char_leaderboard/':
-        rows = rank_rows('cup')
+        rows = []
+        for acct in state['accounts'].values():
+            rows.append({'id': acct['username'], 'handle': acct['handle'], 'name': acct['handle'],
+                         'num_chars': len(acct.get('characters', [])), 'cup': acct.get('cup', 0),
+                         'coin': acct.get('coin', 0), 'crown': acct.get('crown', 0), 'title': acct.get('title', ''),
+                         'character': (acct.get('characters') or [CHARS[0]])[-1].get('path', CHARS[0]['path']),
+                         'path': (acct.get('characters') or [CHARS[0]])[-1].get('path', CHARS[0]['path']),
+                         'card_path': (acct.get('characters') or [CHARS[0]])[-1].get('card_path', CHARS[0]['card_path']),
+                         'rank': 0})
+        rows.sort(key=lambda r: r['num_chars'], reverse=True)
+        rows = rows[:50]
+        for i, r in enumerate(rows):
+            r['rank'] = i + 1
         return 200, {'ranks': rows, 'my_rank': next((r['rank'] for r in rows if r.get('id') == a.get('username')), 0)}
     # ---- chat ----
     if path == '/chat/send/':
