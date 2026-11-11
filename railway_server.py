@@ -208,6 +208,11 @@ def save_state():
     except Exception:
         pass
 
+def _ensure_chat():
+    if 'chat' not in state:
+        state['chat'] = {'next': 1, 'rooms': {}}
+
+
 def new_account(username):
     state['userCounter'] += 1
     return {
@@ -434,7 +439,21 @@ def route(path, body, a):
         best = alive[0]
         return 200, {'best_server': {'ip': best['ip'], 'port': best['port'], 'total_stage': best['total_stage']}, 'all_servers': [{'ip': s['ip'], 'port': s['port'], 'total_stage': s['total_stage']} for s in alive[1:]]}
     if path == '/game/select_map/':
-        return 200, {'map': {'id': 1, 'path': 'res://Scenes/maps/CannonLevel.tscn', 'max_players_count': 32, 'min_players_count': 1, 'bot_count': 10, 'bot_wait_remove': 100, 'bot_reset_time': 30}, 'settings': {'game_time': 120, 'lobby_time': 60, 'countdown_time': 10, 'result_time': 10, 'player_join_add_time': 5}}
+        # سرور تعیین می‌کند هر مرحله کدام نقشه باشد
+        gid = int(body.get('id') or 0)
+        games = state.setdefault('games', {})
+        g = games.setdefault('g' + str(gid), {'stage': 0})
+        g['stage'] = int(g.get('stage', 0)) + 1
+        maps = [
+            ('res://Scenes/maps/CannonLevel.tscn', 10),
+            ('res://Scenes/maps/RunningLevel.tscn', 10),
+            ('res://Scenes/maps/Hexagon_elimination_level.tscn', 10),
+        ]
+        idx = min(g['stage'], len(maps)) - 1
+        mpath, bots = maps[idx]
+        save_state()
+        log('select_map game=' + str(gid) + ' stage=' + str(g['stage']) + ' -> ' + mpath)
+        return 200, {'map': {'id': g['stage'], 'path': mpath, 'max_players_count': 32, 'min_players_count': 1, 'bot_count': bots, 'bot_wait_remove': 100, 'bot_reset_time': 30}, 'settings': {'game_time': 120, 'lobby_time': 60, 'countdown_time': 10, 'result_time': 10, 'player_join_add_time': 5}}
     if path == '/game/results_v2/':
         return 200, {'my_result': {'coin': 50, 'cup': 10, 'crown': 0}, 'winner': None}
     if path == '/game/list_freeride_servers/':
@@ -447,6 +466,44 @@ def route(path, body, a):
         return 200, {'ranks': rank_rows('coin')}
     if path == '/game/char_leaderboard/':
         return 200, {'ranks': rank_rows('cup')}
+    # ---- chat ----
+    if path == '/chat/send/':
+        _ensure_chat()
+        room = str(body.get('room') or 'PublicChat')[:64]
+        content = body.get('content')
+        if not isinstance(content, str):
+            content = json.dumps(content or {})
+        mid = state['chat']['next']
+        state['chat']['next'] = mid + 1
+        msg = {
+            'id': mid,
+            'content': content[:4000],
+            'channel_id': room,
+            'sender_id': a['username'],
+            'handle': a['handle'],
+            'create_time': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime()),
+        }
+        room_msgs = state['chat']['rooms'].setdefault(room, [])
+        room_msgs.append(msg)
+        if len(room_msgs) > 200:
+            del room_msgs[0:len(room_msgs) - 200]
+        save_state()
+        return 200, {'ok': True, 'id': mid}
+    if path == '/chat/fetch/':
+        _ensure_chat()
+        room = str(body.get('room') or 'PublicChat')[:64]
+        since = int(body.get('since') or 0)
+        room_msgs = state['chat']['rooms'].get(room, [])
+        out = [m for m in room_msgs if int(m.get('id', 0)) > since]
+        return 200, {'messages': out[-100:]}
+    if path == '/chat/history/':
+        _ensure_chat()
+        room = str(body.get('room') or 'PublicChat')[:64]
+        limit = int(body.get('limit') or 50)
+        room_msgs = state['chat']['rooms'].get(room, [])
+        out = list(room_msgs)[-limit:]
+        out.reverse()
+        return 200, {'messages': out}
     # ---- police ----
     if path == '/police/arrest_list/':
         return 200, {'arrests': []}
