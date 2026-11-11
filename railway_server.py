@@ -252,18 +252,64 @@ def get_char(cid):
 
 _MEMBER_KEYS = ['cup','coin','crown','email','daily_claim_time','hunger','warmth','title','title_color','is_test','name_changed_count','show_debug','ban_time','free_admin','bazras','stealth','chat_admin','jail_time','in_prison','progress_level','is_meta_progress_finished','win_count','game_count']
 
+
+PHONES = [
+    {'id': 1, 'name': 'Nokia 1201', 'motto': 'Iconic Brick', 'price': 0, 'scene_path': 'res://Scenes/Mobile/Phones/1201/Nokia1201.tscn'},
+    {'id': 2, 'name': 'Poco X6', 'motto': 'Power Player', 'price': 5000, 'scene_path': 'res://Scenes/Mobile/Phones/PocoX6/PocoX6.tscn'},
+    {'id': 3, 'name': 'iPhone 16 Pro Max', 'motto': 'Pro Style', 'price': 15000, 'scene_path': 'res://Scenes/Mobile/Phones/iPhone/iPhone16ProMax.tscn'},
+    {'id': 4, 'name': 'Galaxy S24 Ultra', 'motto': 'Flagship', 'price': 25000, 'scene_path': 'res://Scenes/Mobile/Phones/S24Ultra/S24Ultra.tscn'},
+]
+
+PROGRESS = [
+    {'level': 1, 'progress_type': 'GameCount', 'game_count': 3, 'cup': 0, 'prize_type': 'Coin', 'prize_coin': 3000, 'prize_character': None},
+    {'level': 2, 'progress_type': 'Cup', 'cup': 10, 'game_count': 3, 'prize_type': 'Coin', 'prize_coin': 5000, 'prize_character': None},
+    {'level': 3, 'progress_type': 'GameCount', 'game_count': 10, 'cup': 10, 'prize_type': 'Coin', 'prize_coin': 8000, 'prize_character': None},
+    {'level': 4, 'progress_type': 'Cup', 'cup': 30, 'game_count': 10, 'prize_type': 'Character', 'prize_coin': 0, 'prize_character': CHARS[5]},
+    {'level': 5, 'progress_type': 'WinCount', 'game_count': 5, 'cup': 30, 'prize_type': 'Coin', 'prize_coin': 12000, 'prize_character': None},
+    {'level': 6, 'progress_type': 'Cup', 'cup': 60, 'game_count': 5, 'prize_type': 'Character', 'prize_coin': 0, 'prize_character': CHARS[15]},
+    {'level': 7, 'progress_type': 'GameCount', 'game_count': 25, 'cup': 60, 'prize_type': 'Coin', 'prize_coin': 20000, 'prize_character': None},
+    {'level': 8, 'progress_type': 'Cup', 'cup': 100, 'game_count': 25, 'prize_type': 'Character', 'prize_coin': 0, 'prize_character': CHARS[40]},
+]
+
+
+def _prog_met(a, pr):
+    t = pr.get('progress_type')
+    if t == 'Cup':
+        return a.get('cup', 0) >= pr.get('cup', 0)
+    if t == 'GameCount':
+        return a.get('game_count', 0) >= pr.get('game_count', 0)
+    if t == 'WinCount':
+        return a.get('win_count', 0) >= pr.get('game_count', 0)
+    return False
+
+
+def current_progress(a):
+    for pr in PROGRESS:
+        if not _prog_met(a, pr):
+            return pr
+    return None
+
+
 def member_json(a):
     out = {'id': a['username'], 'handle': a['handle']}
     for k in _MEMBER_KEYS:
         out[k] = a.get(k)
+    cur = current_progress(a)
+    out['progress_level'] = cur if cur is not None else PROGRESS[-1]
+    out['is_meta_progress_finished'] = cur is None
     return out
+
+
 
 def rank_rows(sort_key):
     rows = []
     for a in state['accounts'].values():
-        rows.append({'id': a['username'], 'handle': a['handle'], 'name': a['handle'], 'cup': a['cup'], 'coin': a['coin'], 'crown': a['crown'], 'win_count': a['win_count'], 'value': a.get(sort_key, 0), 'count': a.get(sort_key, 0), 'character': CHARS[0]['path'], 'path': CHARS[0]['path'], 'card_path': CHARS[0]['card_path']})
+        rows.append({'id': a['username'], 'handle': a['handle'], 'name': a['handle'], 'cup': a['cup'], 'coin': a['coin'], 'crown': a['crown'], 'win_count': a['win_count'], 'value': a.get(sort_key, 0), 'count': a.get(sort_key, 0), 'title': a.get('title', ''), 'rank': 0, 'character': CHARS[0]['path'], 'path': CHARS[0]['path'], 'card_path': CHARS[0]['card_path']})
     rows.sort(key=lambda r: r.get(sort_key, 0), reverse=True)
-    return rows[:50]
+    rows = rows[:50]
+    for i, r in enumerate(rows):
+        r['rank'] = i + 1
+    return rows
 
 
 def route(path, body, a):
@@ -283,7 +329,7 @@ def route(path, body, a):
     if a is None:
         return 401, {'error': 'unauthorized'}
     if path == '/account/sync/':
-        return 200, {'data': {'data': a.get('data', {})}, 'member': member_json(a), 'characters': a['characters'], 'sync': SYNC_PRICES, 'online_count': max(1, len(state['accounts'])), 'public_chat': 'PublicChat', 'progresses': [], 'phones': [], 'clan': None, 'clan_levels': CLAN_LEVELS}
+        return 200, {'data': {'data': a.get('data', {})}, 'member': member_json(a), 'characters': a['characters'], 'sync': SYNC_PRICES, 'online_count': max(1, len(state['accounts'])), 'public_chat': 'PublicChat', 'progresses': PROGRESS, 'phones': PHONES, 'clan': None, 'clan_levels': CLAN_LEVELS}
     if path == '/account/save_data/':
         jwt = a.get('data', {}).get('JWT') if isinstance(a.get('data'), dict) else None
         a['data'] = body
@@ -317,9 +363,23 @@ def route(path, body, a):
         save_state()
         return 200, {}
     if path == '/account/claim_progress_prize/':
-        a['coin'] += 500
+        cur = current_progress(a)
+        lvl = int(body.get('level') or (cur['level'] if cur else 0))
+        target = None
+        for pr in PROGRESS:
+            if pr['level'] == lvl:
+                target = pr
+                break
+        claimed = a.setdefault('progress_claimed', [])
+        if target is None or lvl in claimed or not _prog_met(a, target):
+            return 200, {'coin': a['coin'], 'ok': False}
+        claimed.append(lvl)
+        if target.get('prize_type') == 'Coin':
+            a['coin'] += int(target.get('prize_coin') or 0)
+        elif target.get('prize_type') == 'Character' and target.get('prize_character'):
+            a['characters'].append(dict(target['prize_character']))
         save_state()
-        return 200, {'coin': a['coin']}
+        return 200, {'coin': a['coin'], 'ok': True}
     if path == '/account/ami_content_creator/':
         return 200, {'is_creator': False}
     if path == '/account/content_creator_stats/':
@@ -330,7 +390,7 @@ def route(path, body, a):
         return 200, {}
     # ---- shop ----
     if path == '/shop/list_shop/':
-        return 200, {'gateway_type': 'IAP', 'items': []}
+        return 200, {'gateway_type': 'IAP', 'items': [], 'phones': PHONES}
     if path == '/shop/verify_purchase/':
         return 200, {'coin': a['coin'], 'characters': [], 'id': 0}
     if path == '/shop/ipg/':
@@ -384,6 +444,17 @@ def route(path, body, a):
         a['coin'] += int(body.get('value') or 0)
         save_state()
         return 200, {'coin': a['coin']}
+    if path == '/police/jail_reduce/':
+        red = int(body.get('reduce') or 0)
+        price = int(body.get('price') or 0)
+        if price and a['coin'] < price:
+            return 400, {'coin': a['coin']}
+        a['coin'] -= price
+        a['jail_time'] = max(0, int(a.get('jail_time') or 0) - red)
+        if a['jail_time'] <= 0:
+            a['in_prison'] = False
+        save_state()
+        return 200, {'coin': a['coin'], 'jail_time': a['jail_time']}
     if path in ('/game/job_done/', '/game/contact_us/', '/game/finish_game/', '/game/change_server_password/'):
         return 200, {}
     if path == '/game/redeem/':
@@ -461,11 +532,15 @@ def route(path, body, a):
     if path == '/game/get_freeride_server_owner/':
         return 200, {'owner': None, 'owner_handle': ''}
     if path == '/game/leaderboard_v2/':
-        return 200, {'ranks': rank_rows('cup'), 'wins': rank_rows('win_count')}
+        rows = rank_rows('cup')
+        wins = rank_rows('win_count')
+        return 200, {'ranks': rows, 'wins': wins, 'my_rank': next((r['rank'] for r in rows if r.get('id') == a.get('username')), 0), 'my_win_rank': next((r['rank'] for r in wins if r.get('id') == a.get('username')), 0)}
     if path == '/game/coin_leaderboard/':
-        return 200, {'ranks': rank_rows('coin')}
+        rows = rank_rows('coin')
+        return 200, {'ranks': rows, 'my_rank': next((r['rank'] for r in rows if r.get('id') == a.get('username')), 0)}
     if path == '/game/char_leaderboard/':
-        return 200, {'ranks': rank_rows('cup')}
+        rows = rank_rows('cup')
+        return 200, {'ranks': rows, 'my_rank': next((r['rank'] for r in rows if r.get('id') == a.get('username')), 0)}
     # ---- chat ----
     if path == '/chat/send/':
         _ensure_chat()
@@ -506,15 +581,15 @@ def route(path, body, a):
         return 200, {'messages': out}
     # ---- police ----
     if path == '/police/arrest_list/':
-        return 200, {'arrests': []}
+        return 200, {'arrests': [], 'results': []}
     if path == '/police/jail_stat/':
-        return 200, {'stats': {}, 'players': []}
+        return 200, {'jail_time': int(a.get('jail_time') or 0), 'stats': {}, 'players': []}
     if path == '/police/police_call/':
         return 200, {'calls': []}
     if path == '/police/police_call_list/':
         return 200, {'calls': []}
     if path == '/police/police_law/':
-        return 200, {'law': ''}
+        return 200, {'law': 'قوانین شهر:\n۱) آسیب به دیگران ممنوع است.\n۲) دزدی و تخریب اموال عمومی جرم است.\n۳) توهین و فحاشی در چت ممنوع است.\n۴) رانندگی پرخطر و تصادف عمدی جرم است.\n۵) در صورت دستگیری، جریمه یا زندان در انتظار شماست.', 'last_update': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}
     if path == '/police/job_q_stats/':
         return 200, {'players': []}
     if path.startswith('/police/'):
