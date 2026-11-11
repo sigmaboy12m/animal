@@ -201,6 +201,17 @@ def load_state():
     except Exception:
         pass
 
+def _backfill_ids():
+    ids = state.setdefault('num_ids', {})
+    n = int(state.get('numCounter', 0) or 0)
+    for un, acct in state['accounts'].items():
+        if un not in ids:
+            n += 1
+            ids[un] = n
+        acct['num_id'] = ids[un]
+    state['numCounter'] = max(n, len(ids))
+
+
 def save_state():
     try:
         with open(STATE_FILE, 'w', encoding='utf-8') as fp:
@@ -229,6 +240,8 @@ def new_account(username):
         'progress_level': 1, 'is_meta_progress_finished': True,
         'characters': [dict(c) for c in CHARS],
         'purchases': [], 'animations': {}, 'data': {}, 'clan_id': None,
+        'job_stats': {'menu': 0, 'cook': 0, 'deliver': 0, 'clean': 0, 'visit': 0, 'heal': 0, 'cash': 0, 'policeKill': 0, 'arrest': 0, 'policeReport': 0, 'policeReportNormal': 0},
+        'police_license': False, 'police_q': None, 'police_score': 0,
     }
 
 def account_for(token):
@@ -291,7 +304,7 @@ def current_progress(a):
 
 
 def member_json(a):
-    out = {'id': a['username'], 'handle': a['handle']}
+    out = {'id': a['username'], 'nid': a.get('num_id', 0), 'handle': a['handle']}
     for k in _MEMBER_KEYS:
         out[k] = a.get(k)
     cur = current_progress(a)
@@ -312,6 +325,94 @@ def rank_rows(sort_key):
     return rows
 
 
+def _load_admin_html():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'admin_panel.html'), 'r', encoding='utf-8') as fp:
+            return fp.read()
+    except Exception:
+        return '<!DOCTYPE html><html dir="rtl"><body style="font-family:sans-serif"><h1>Animal Admin</h1><p>admin_panel.html not found next to the server.</p></body></html>'
+
+
+ADMIN_HTML = _load_admin_html()
+
+
+def _find_account(key):
+    if key is None:
+        return None
+    k = str(key)
+    if k in state['accounts']:
+        return state['accounts'][k]
+    try:
+        n = int(float(k))
+    except Exception:
+        return None
+    for acct in state['accounts'].values():
+        if state.get('num_ids', {}).get(acct['username']) == n:
+            return acct
+    for acct in state['accounts'].values():
+        if acct.get('num_id') == n or acct.get('id') == n:
+            return acct
+    return None
+
+
+def _admin_ok(body):
+    key = os.environ.get('ADMIN_KEY', 'animal-admin')
+    return str((body or {}).get('key') or '') == key
+
+
+def admin_users():
+    out = []
+    ids = state.setdefault('num_ids', {})
+    for i, (un, acct) in enumerate(state['accounts'].items()):
+        out.append({
+            'id': ids.get(un, 0),
+            'username': un,
+            'handle': acct.get('handle'),
+            'coin': acct.get('coin', 0),
+            'cup': acct.get('cup', 0),
+            'title': acct.get('title', ''),
+            'bazras': bool(acct.get('bazras')),
+            'free_admin': bool(acct.get('free_admin')),
+            'ban_time': acct.get('ban_time', 0),
+            'online': False,
+        })
+    out.sort(key=lambda r: r['coin'], reverse=True)
+    return out
+
+
+def route_admin(path, body):
+    if not _admin_ok(body):
+        return 403, {'error': 'bad admin key'}
+    if path == '/admin/users/':
+        return 200, {'users': admin_users()}
+    target = _find_account(body.get('id') or body.get('user_id') or body.get('username'))
+    if target is None:
+        return 404, {'error': 'no such user'}
+    if path == '/admin/give_coin/':
+        target['coin'] = int(target.get('coin', 0)) + int(body.get('amount') or 0)
+    elif path == '/admin/set_title/':
+        target['title'] = str(body.get('title') or '')
+        target['title_color'] = str(body.get('title_color') or 'FFFFFF')
+    elif path == '/admin/grant_bazras/':
+        v = body.get('value')
+        target['bazras'] = bool(v) if v is not None else True
+        if target['bazras']:
+            target.setdefault('free_admin', False)
+        if body.get('admin') is not None:
+            target['free_admin'] = bool(body.get('admin'))
+    elif path == '/admin/ban/':
+        target['ban_time'] = int(float(body.get('hours') or 1) * 3600)
+    elif path == '/admin/unban/':
+        target['ban_time'] = 0
+    elif path == '/admin/set_coin/':
+        target['coin'] = int(body.get('amount') or 0)
+    else:
+        return 404, {'error': 'unknown admin route'}
+    save_state()
+    log('admin ' + path + ' -> ' + target['username'])
+    return 200, {'coin': target.get('coin'), 'user': {'id': target.get('num_id', 0), 'username': target['username'], 'handle': target.get('handle'), 'title': target.get('title', ''), 'bazras': bool(target.get('bazras'))}}
+
+
 def route(path, body, a):
     now = int(time.time())
     # ---- account ----
@@ -320,12 +421,16 @@ def route(path, body, a):
         rnd = ''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(5))
         username = 'u' + str(state['userCounter']) + '_' + rnd
         acct = new_account(username)
+        nid = state.setdefault('numCounter', 0) + 1
+        state['numCounter'] = nid
+        state.setdefault('num_ids', {})[username] = nid
+        acct['num_id'] = nid
         state['accounts'][username] = acct
         tok = 'T' + username + '.' + ''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(10))
         state['tokens'][tok] = username
         save_state()
         log('register -> ' + username)
-        return 200, {'handle': acct['handle'], 'token': tok, 'username': username}
+        return 200, {'handle': acct['handle'], 'token': tok, 'username': username, 'id': nid}
     if a is None:
         return 401, {'error': 'unauthorized'}
     if path == '/account/sync/':
@@ -392,6 +497,10 @@ def route(path, body, a):
     if path == '/shop/list_shop/':
         return 200, {'gateway_type': 'IAP', 'items': [], 'phones': PHONES}
     if path == '/shop/verify_purchase/':
+        sku = str(body.get('sku') or '')
+        if sku == 'police_license':
+            a['police_license'] = True
+            save_state()
         return 200, {'coin': a['coin'], 'characters': [], 'id': 0}
     if path == '/shop/ipg/':
         return 400, {}
@@ -455,14 +564,41 @@ def route(path, body, a):
             a['in_prison'] = False
         save_state()
         return 200, {'coin': a['coin'], 'jail_time': a['jail_time']}
-    if path in ('/game/job_done/', '/game/contact_us/', '/game/finish_game/', '/game/change_server_password/'):
+    if path == '/game/job_done/':
+        s = a.setdefault('job_stats', {})
+        job = str(body.get('job') or '')
+        if job in s:
+            s[job] = int(s[job]) + 1
+        save_state()
+        return 200, {'stats': s}
+    if path in ('/game/contact_us/', '/game/finish_game/', '/game/change_server_password/'):
         return 200, {}
     if path == '/game/redeem/':
         return 400, {}
     if path == '/game/my_job_stats/':
-        return 200, {'coin': a['coin'], 'stats': {}}
+        s = a.get('job_stats') or {}
+        rest = int(s.get('menu', 0)) + int(s.get('cook', 0)) + int(s.get('deliver', 0)) + int(s.get('clean', 0))
+        hosp = int(s.get('visit', 0)) + int(s.get('heal', 0))
+        bank = int(s.get('cash', 0))
+        police = int(s.get('policeKill', 0)) + int(s.get('arrest', 0)) + int(s.get('policeReport', 0)) + int(s.get('policeReportNormal', 0))
+        return 200, {'coin': a['coin'], 'restaurant': rest, 'hospital': hosp, 'bank': bank, 'police': police, 'stats': s}
     if path == '/game/hire_me/':
-        return 200, {'coin': a['coin'], 'ok': True}
+        job = body.get('job') or {}
+        price = int(body.get('price') or 0)
+        title = str(job.get('title') or '')
+        if not title:
+            return 400, {'coin': a['coin']}
+        if a['coin'] < price:
+            return 400, {'coin': a['coin']}
+        a['coin'] -= price
+        a['title'] = title
+        a['title_color'] = str(job.get('color') or 'FFFFFF')
+        stats = a.setdefault('job_stats', {})
+        for k in stats:
+            stats[k] = 0
+        save_state()
+        log('hire_me ' + a['username'] + ' -> ' + title)
+        return 200, {'coin': a['coin'], 'ok': True, 'title': title}
     if path == '/game/transfer_money/':
         amount = int(body.get('amount') or body.get('coin') or 0)
         if a['coin'] < amount:
@@ -591,10 +727,61 @@ def route(path, body, a):
     if path == '/police/police_law/':
         return 200, {'law': 'قوانین شهر:\n۱) آسیب به دیگران ممنوع است.\n۲) دزدی و تخریب اموال عمومی جرم است.\n۳) توهین و فحاشی در چت ممنوع است.\n۴) رانندگی پرخطر و تصادف عمدی جرم است.\n۵) در صورت دستگیری، جریمه یا زندان در انتظار شماست.', 'last_update': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}
     if path == '/police/job_q_stats/':
-        return 200, {'players': []}
+        q = a.get('police_q')
+        if not a.get('police_license'):
+            return 200, {'has_license': True, 'has_q': False, 'rank': 0, 'time': 0, 'score': 0, 'gateway_type': 'IAP', 'players': []}
+        if q is None:
+            return 200, {'has_license': False, 'has_q': False, 'rank': 0, 'time': 0, 'score': 0, 'gateway_type': 'IAP', 'players': []}
+        rank = 1
+        for x in state.setdefault('police_queue', []):
+            if x.get('username') == a['username']:
+                break
+            rank += 1
+        return 200, {'has_license': False, 'has_q': True, 'rank': rank, 'time': int(now - int(q.get('time', now))), 'score': int(a.get('police_score', 0)), 'gateway_type': 'IAP', 'players': []}
+    if path == '/police/add_me_to_job_q/':
+        price = int(body.get('price') or 0)
+        if a['coin'] < price:
+            return 401, {'coin': a['coin']}
+        a['coin'] -= price
+        a['police_q'] = {'time': now}
+        ql = state.setdefault('police_queue', [])
+        if not any(x.get('username') == a['username'] for x in ql):
+            ql.append({'username': a['username'], 'handle': a['handle'], 'score': int(a.get('police_score', 0)), 'time': now})
+        save_state()
+        return 200, {'coin': a['coin']}
+    if path == '/police/add_score_to_job_q/':
+        c = int(body.get('coin') or 0)
+        if a['coin'] < c:
+            return 401, {'coin': a['coin']}
+        a['coin'] -= c
+        a['police_score'] = int(a.get('police_score', 0)) + c
+        for x in state.setdefault('police_queue', []):
+            if x.get('username') == a['username']:
+                x['score'] = a['police_score']
+        save_state()
+        return 200, {'coin': a['coin'], 'score': a['police_score']}
     if path.startswith('/police/'):
         return 200, {}
-    if path in ('/game/ban_user/', '/game/report_message/', '/game/free_admin_ban/', '/game/free_admin_unban/', '/game/free_admin_set_title/'):
+    if path == '/game/free_admin_ban/':
+        t = _find_account(body.get('backend_id'))
+        if t is not None:
+            t['ban_time'] = int(float(body.get('time') or 1) * 3600)
+            save_state()
+        return 200, {}
+    if path == '/game/free_admin_unban/':
+        t = _find_account(body.get('backend_id'))
+        if t is not None:
+            t['ban_time'] = 0
+            save_state()
+        return 200, {}
+    if path == '/game/free_admin_set_title/':
+        t = _find_account(body.get('backend_id'))
+        if t is not None:
+            t['title'] = str(body.get('title') or '')
+            t['title_color'] = str(body.get('title_color') or 'FFFFFF')
+            save_state()
+        return 200, {}
+    if path in ('/game/ban_user/', '/game/report_message/'):
         return 200, {}
     log('unhandled route: ' + str(path))
     return 200, {}
@@ -613,6 +800,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, html):
+        b = html.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(b)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(b)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -624,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if p in ('/', '/health', '/healthz'):
             self._send(200, {'ok': True, 'service': 'animal-rush-backend', 'accounts': len(state['accounts']), 'time': int(time.time())})
+        elif p in ('/admines', '/admines/', '/admin', '/admin/'):
+            self._send_html(ADMIN_HTML)
         else:
             self._send(404, {'error': 'not found'})
 
@@ -639,6 +837,15 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get('Authorization') or ''
         token = auth[4:] if auth.startswith('JWT ') else auth
         path = self.path.split('?')[0]
+        if path.startswith('/admin/'):
+            with _lock:
+                try:
+                    code, obj = route_admin(path, body)
+                except Exception as exc:
+                    log('admin error ' + str(path) + ': ' + repr(exc))
+                    code, obj = 500, {'error': 'internal'}
+            self._send(code, obj)
+            return
         with _lock:
             a = account_for(token)
             try:
@@ -654,6 +861,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     load_state()
+    _backfill_ids()
     log('Animal Rush backend (Railway) listening on ' + HOST + ':' + str(PORT))
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
